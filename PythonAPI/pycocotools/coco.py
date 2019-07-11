@@ -294,10 +294,11 @@ class COCO:
             for ann in anns:
                 print(ann['caption'])
 
-    def loadRes(self, resFile):
+    def loadRes(self, resFile, maxDets=100):
         """
         Load result file and return a result api object.
         :param   resFile (str)     : file name of result file
+        :param   maxDets (int)     : max number of detections per image
         :return: res (obj)         : result api object
         """
         res = COCO()
@@ -311,6 +312,9 @@ class COCO:
             anns = self.loadNumpyAnnotations(resFile)
         else:
             anns = resFile
+
+        anns = self.limitDetsPerImg(anns, maxDets)
+
         assert type(anns) == list, 'results in not an array of objects'
         annsImgIds = [ann['image_id'] for ann in anns]
         assert set(annsImgIds) == (set(annsImgIds) & set(self.getImgIds())), \
@@ -401,6 +405,25 @@ class COCO:
                 'category_id': int(data[i, 6]),
                 }]
         return ann
+
+    def limitDetsPerImg(self, anns, maxDets):
+        img_ann = defaultdict(list)
+        for ann in anns:
+            img_ann[ann["image_id"]].append(ann)
+
+
+        for img_id, _anns in img_ann.items():
+            if len(_anns) <= maxDets:
+                continue
+            _anns = sorted(_anns, key=lambda ann: ann['score'], reverse=True)
+            img_ann[img_id] = _anns[:maxDets]
+
+        return [
+            ann
+            for img_id, anns in img_ann.items()
+            for ann in anns
+        ]
+
 
     def annToRLE(self, ann):
         """
