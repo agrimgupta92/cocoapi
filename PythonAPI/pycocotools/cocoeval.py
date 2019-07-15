@@ -57,7 +57,7 @@ class COCOeval:
     # Data, paper, and tutorials available at:  http://mscoco.org/
     # Code written by Piotr Dollar and Tsung-Yi Lin, 2015.
     # Licensed under the Simplified BSD License [see coco/license.txt]
-    def __init__(self, cocoGt=None, cocoDt=None, iouType='segm', islvis=False):
+    def __init__(self, cocoGt=None, cocoDt=None, iouType='segm', is_federated=False):
         '''
         Initialize CocoEval using coco APIs for gt and dt
         :param cocoGt: coco object with ground truth annotations
@@ -76,14 +76,12 @@ class COCOeval:
         self._paramsEval = {}               # parameters for evaluation
         self.stats = []                     # result summarization
         self.ious = {}                      # ious between all gts and dts
-        self.islvis = islvis
+        self.is_federated = is_federated
         if not cocoGt is None:
             self.params.imgIds = sorted(cocoGt.getImgIds())
             self.params.catIds = sorted(cocoGt.getCatIds())
-        if self.islvis:
-            print("You are using LVIS API.")
-        else:
-            print("You are using COCO API")
+        if self.is_federated:
+            print("Federated dataset evaluation is enabled.")
 
     def _prepare(self):
         '''
@@ -117,15 +115,24 @@ class COCOeval:
         self._dts = defaultdict(list)       # dt for evaluation
         for gt in gts:
             self._gts[gt['image_id'], gt['category_id']].append(gt)
-        if self.islvis:
+        # For federated dataset evaluation we will filter out all dt for an
+        # image which belong to categories not present in gt and not present in
+        # the negative list for an image. In other words detector is not penalized
+        # for categories about which we don't have gt information about their
+        # presence or absence in an image.
+        if self.is_federated:
             img_data = self.cocoGt.loadImgs(ids=p.imgIds)
+            # per image map of categories not present in image
             img_nl = {d["id"]: d["neg_category_ids"] for d in img_data}
+            # per image list of categories present in image
             img_pl = defaultdict(set)
             for ann in gts:
                 img_pl[ann["image_id"]].add(ann["category_id"])
+            # per image map of categoires which have missing gt. For these
+            # categories we don't penalize the detector for flase positives.
             self.img_nel = {d["id"]: d["not_exhaustive"] for d in img_data}
         for dt in dts:
-            if self.islvis:
+            if self.is_federated:
                 img_id, cat_id = dt['image_id'], dt['category_id']
                 if cat_id not in img_nl[img_id] and cat_id not in img_pl[img_id]:
                     continue
@@ -133,10 +140,10 @@ class COCOeval:
 
         self.evalImgs = defaultdict(list)   # per-image per-category evaluation results
         self.eval     = {}                  # accumulated evaluation results
-        if self.islvis:
-            self.catGroups = self._prepareCatGroups()
+        if self.is_federated:
+            self.freqGroup = self._preparefreqGroup()
 
-    def _prepareCatGroups(self):
+    def _preparefreqGroup(self):
         cat_groups = [[] for _ in self.params.imgCountLbl]
         cat_data = self.cocoGt.loadCats(self.params.catIds)
         for idx, _cat_data in enumerate(cat_data):
@@ -325,10 +332,12 @@ class COCOeval:
             d['area'] < aRng[0] or d['area'] > aRng[1]
             for d in dt
         ]
-        if self.islvis:
+        # per image map of categoires which have missing gt. For these
+        # categories we don't penalize the detector for flase positives.
+        if self.is_federated:
             toIg = [
                 d['area'] < aRng[0] or d['area'] > aRng[1] or
-                d['category_id'] in self.img_nel[d['image_id']]
+                d['category_id'] in self.img_nel[imgId]
                 for d in dt
             ]
         a = np.array(toIg).reshape((1, len(dt)))
@@ -385,13 +394,6 @@ class COCOeval:
         i_list = [n for n, i in enumerate(p.imgIds)  if i in setI]
         I0 = len(_pe.imgIds)
         A0 = len(_pe.areaRng)
-        dt_pointers = {}
-        for k, _ in enumerate(k_list):
-            dt_pointers[k] = {}
-            for a, _ in enumerate(a_list):
-                dt_pointers[k][a] = {}
-                for m, _ in enumerate(m_list):
-                    dt_pointers[k][a][m] = {}
         # retrieve E at each category, area range, and max number of detections
         for k, k0 in enumerate(k_list):
             Nk = k0*A0*I0
@@ -403,13 +405,11 @@ class COCOeval:
                     if len(E) == 0:
                         continue
                     dtScores = np.concatenate([e['dtScores'][0:maxDet] for e in E])
-                    dtIds = np.concatenate([e['dtIds'][0:maxDet] for e in E])
 
                     # different sorting method generates slightly different results.
                     # mergesort is used to be consistent as Matlab implementation.
                     inds = np.argsort(-dtScores, kind='mergesort')
                     dtScoresSorted = dtScores[inds]
-                    dtIdsSorted = dtIds[inds]
 
                     dtm  = np.concatenate([e['dtMatches'][:,0:maxDet] for e in E], axis=1)[:,inds]
                     dtIg = np.concatenate([e['dtIgnore'][:,0:maxDet]  for e in E], axis=1)[:,inds]
@@ -422,13 +422,6 @@ class COCOeval:
 
                     tp_sum = np.cumsum(tps, axis=1).astype(dtype=np.float)
                     fp_sum = np.cumsum(fps, axis=1).astype(dtype=np.float)
-
-                    dt_pointers[k][a][m] = {
-                        'dtIds': dtIdsSorted,
-                        'tps': tps,
-                        'fps': fps,
-                    }
-
                     for t, (tp, fp) in enumerate(zip(tp_sum, fp_sum)):
                         tp = np.array(tp)
                         fp = np.array(fp)
@@ -467,7 +460,6 @@ class COCOeval:
             'precision': precision,
             'recall':   recall,
             'scores': scores,
-            'dt_pointers': dt_pointers,
         }
         toc = time.time()
         print('DONE (t={:0.2f}s).'.format( toc-tic))
@@ -495,7 +487,7 @@ class COCOeval:
                     t = np.where(iouThr == p.iouThrs)[0]
                     s = s[t]
                 if catGroupIdx is not None:
-                    s = s[:,:, self.catGroups[catGroupIdx],aind,mind]
+                    s = s[:,:, self.freqGroup[catGroupIdx],aind,mind]
                 else:
                     s = s[:,:,:,aind,mind]
             else:
@@ -513,7 +505,7 @@ class COCOeval:
             print(iStr.format(titleStr, typeStr, iouStr, areaRng, maxDets, catGroupName, mean_s))
             return mean_s
         def _summarizeDets():
-            if self.islvis:
+            if self.is_federated:
                 stats = np.zeros((15,))
             else:
                 stats = np.zeros((12,))
@@ -523,7 +515,7 @@ class COCOeval:
             stats[3] = _summarize(1, areaRng='small', maxDets=self.params.maxDets[2])
             stats[4] = _summarize(1, areaRng='medium', maxDets=self.params.maxDets[2])
             stats[5] = _summarize(1, areaRng='large', maxDets=self.params.maxDets[2])
-            if self.islvis:
+            if self.is_federated:
                 stats[6] = _summarize(1, maxDets=self.params.maxDets[2], catGroupIdx=0)
                 stats[7] = _summarize(1, maxDets=self.params.maxDets[2], catGroupIdx=1)
                 stats[8] = _summarize(1, maxDets=self.params.maxDets[2], catGroupIdx=2)
@@ -576,6 +568,11 @@ class Params:
         self.areaRng = [[0 ** 2, 1e5 ** 2], [0 ** 2, 32 ** 2], [32 ** 2, 96 ** 2], [96 ** 2, 1e5 ** 2]]
         self.areaRngLbl = ['all', 'small', 'medium', 'large']
         self.useCats = 1
+        # We bin categories in three bins based how many images of the training set
+        # the category is present in.
+        # r: Rare    :  < 10
+        # c: Common  : >= 10 and < 100
+        # f: Frequent: >= 100
         self.imgCountLbl = ['r', 'c', 'f']
 
     def setKpParams(self):

@@ -294,7 +294,7 @@ class COCO:
             for ann in anns:
                 print(ann['caption'])
 
-    def loadRes(self, resFile, maxDets=100):
+    def loadRes(self, resFile, maxDets=-1):
         """
         Load result file and return a result api object.
         :param   resFile (str)     : file name of result file
@@ -313,7 +313,8 @@ class COCO:
         else:
             anns = resFile
 
-        anns = self.limitDetsPerImg(anns, maxDets)
+        if maxDets >= 0:
+            anns = self.limitDetsPerImg(anns, maxDets)
 
         assert type(anns) == list, 'results in not an array of objects'
         annsImgIds = [ann['image_id'] for ann in anns]
@@ -411,7 +412,6 @@ class COCO:
         for ann in anns:
             img_ann[ann["image_id"]].append(ann)
 
-
         for img_id, _anns in img_ann.items():
             if len(_anns) <= maxDets:
                 continue
@@ -420,7 +420,7 @@ class COCO:
 
         return [
             ann
-            for img_id, anns in img_ann.items()
+            for anns in img_ann.values()
             for ann in anns
         ]
 
